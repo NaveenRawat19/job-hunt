@@ -128,16 +128,48 @@ class StudyPlanRequirement(BaseModel):
     extra: str = Field("", max_length=2000)
 
 
+class StudyPlanPlanTask(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    track: str = Field(min_length=1, max_length=100)
+    task: str = Field(min_length=1, max_length=5000)
+
+
+class StudyPlanPlanDay(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    day: int = Field(ge=1)
+    tasks: list[StudyPlanPlanTask] = Field(min_length=1, max_length=30)
+
+
+class StudyPlanPlanWeek(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    week: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=200)
+    days: list[StudyPlanPlanDay] = Field(min_length=1, max_length=7)
+
+
+class StudyPlanJson(BaseModel):
+    """Structured equivalent of the planner app's week/day/task format."""
+    model_config = ConfigDict(extra="ignore")
+
+    weeks: list[StudyPlanPlanWeek] = Field(min_length=1, max_length=1000)
+
+
 class StudyPlanText(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
-    plan: str = Field(min_length=1, max_length=500_000,
-                      description="The plan in the planner app's import format "
-                                  "(### Week N: / **Day N** / - [ ] **TRACK:** ...).")
+    plan: Annotated[str, Field(min_length=1, max_length=500_000)] | StudyPlanJson = Field(
+        description="Planner-format text (### Week N: / **Day N** / - [ ] **TRACK:** ...), "
+                    "structured JSON with weeks/days/tasks, or JSON text of either.")
 
 
-class StudyPlanImport(StudyPlanRequirement, StudyPlanText):
-    """Requirements plus a ready-made plan to store as is (no LLM)."""
+class StudyPlanImport(StudyPlanRequirement):
+    """Requirements plus a ready-made text or structured plan to store (no LLM)."""
+
+    plan: str | StudyPlanJson = Field(
+        description="The plan as planner-format text or structured JSON with weeks, days, and tasks.")
 
 
 class StudyPlanOut(StudyPlanRequirement):

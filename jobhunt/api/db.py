@@ -388,6 +388,9 @@ class Database:
     async def get_study_plan(self,user_id,plan_id):
         r=await self._one('SELECT * FROM study_plans WHERE user_id=%s AND id=%s',(user_id,plan_id))
         return {**json.loads(r['data']),'id':r['id'],'created_at':r['created_at'],'plan':r['plan']} if r else None
+    async def delete_study_plan(self, user_id, plan_id):
+        return bool(await self._write(
+            'DELETE FROM study_plans WHERE user_id=%s AND id=%s', (user_id, plan_id)))
     async def latest_study_plan(self,user_id):
         r=await self._one('SELECT * FROM study_plans WHERE user_id=%s ORDER BY id DESC LIMIT 1',(user_id,))
         return {**json.loads(r['data']),'id':r['id'],'created_at':r['created_at'],'plan':r['plan']} if r else None

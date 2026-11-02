@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import io
+import json
 import asyncio
 import logging
 import os
@@ -56,7 +57,8 @@ from ..services.auth_service import AuthService
 from .schemas import (AppliedJob, AppliedJobList, JobDetail, JobList, MatchList, MeOut, Profile,
                       ProfileOut, ProfileUpdate,
                       RegisterRequest, ResumeListItem, RunOut, SearchRequest, SkillInsights, StatsOut,
-                      StudyPlanImport, StudyPlanRequirement, StudyPlanOut, StudyPlanText, TokenOut, UserOut)
+                      StudyPlanImport, StudyPlanJson, StudyPlanRequirement, StudyPlanOut,
+                      StudyPlanText, TokenOut, UserOut)
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -84,6 +86,37 @@ def check_plan(plan: str, requirements: dict) -> None:
         shown = problems[:studyplan.MAX_PROBLEMS_SHOWN]
         raise HTTPException(422, "plan does not match the expected format: " + "; ".join(shown)
                             + (f"; and {len(problems) - len(shown)} more" if len(problems) > len(shown) else ""))
+
+
+def plan_to_text(plan: "str | StudyPlanJson", review_days: bool) -> str:
+    """Planner-format text from the text, a structured plan, or JSON text of either
+    (also a whole export that holds the plan under `plan` or `weeks`)."""
+    if isinstance(plan, str):
+        stripped = plan.strip()
+        if stripped.startswith("{"):
+            try:
+                doc = json.loads(stripped)
+            except ValueError:
+                doc = None
+            if isinstance(doc, dict):
+                inner = doc.get("plan", doc if "weeks" in doc else None)
+                if isinstance(inner, str):
+                    return plan_to_text(inner, review_days)
+                if isinstance(inner, dict):
+                    try:
+                        plan = StudyPlanJson.model_validate({"weeks": inner.get("weeks")})
+                    except ValidationError as e:
+                        first = e.errors()[0]
+                        where = ".".join(str(p) for p in first["loc"])
+                        raise HTTPException(422, f"plan JSON is invalid at {where}: {first['msg']}")
+        if isinstance(plan, str):
+            return stripped + "\n"
+    weeks = [{"n": w.week, "title": w.title,
+              "days": [{"n": d.day, "tasks": [(t.track, t.task) for t in d.tasks]} for d in w.days]}
+             for w in plan.weeks]
+    return studyplan.render_weeks(weeks, review_days)
+
+
 MAX_PAGE_SIZE = 500
 
 BEARER = {"WWW-Authenticate": "Bearer"}
@@ -412,28 +445,35 @@ def create_app(db_path: str | Path | None = None, config_path: str | Path | None
     async def import_study_plan(body: StudyPlanImport, user: dict = Depends(current_user)) -> dict:
         """Save a plan you already have (e.g. imported in the planner app) together with its
         requirements. Nothing is generated; the text must match the plan format, the
-        `tracks` and the duration, otherwise 422 lists what is wrong."""
+        `tracks` and the duration, otherwise 422 lists what is wrong. `plan` can be the
+        planner-format text or a structured JSON object with `weeks`, `days`, and `tasks`."""
         data = body.model_dump(exclude={"plan"})
         max_days = _env_int("MAX_PLAN_DAYS", 120)
         if studyplan.plan_days(data) > max_days:
             raise HTTPException(422, f"a plan can cover at most {max_days} days")
-        plan = body.plan.strip() + "\n"
+        plan = plan_to_text(body.plan, body.review_days)
         check_plan(plan, data)
         stored = await db.save_study_plan(user["id"], data)
         await db.set_study_plan_text(user["id"], stored["id"], plan)
         return {**stored, "plan": plan}
 
     @app.put("/study-plan/{plan_id}/plan", response_model=StudyPlanOut, tags=["study plan"])
-    async def save_study_plan_text(plan_id: int, body: StudyPlanText,
+    async def save_study_plan(plan_id: int, body: StudyPlanText,
                                    user: dict = Depends(current_user)) -> dict:
         """Replace the plan text of a stored study plan, e.g. after editing or importing it."""
         stored = await db.get_study_plan(user["id"], plan_id)
         if not stored:
             raise HTTPException(404, "no such study plan")
-        plan = body.plan.strip() + "\n"
+        plan = plan_to_text(body.plan, stored["review_days"])
         check_plan(plan, stored)
         await db.set_study_plan_text(user["id"], plan_id, plan)
         return {**stored, "plan": plan}
+
+    @app.delete("/study-plan/{plan_id}", status_code=204, tags=["study plan"])
+    async def delete_study_plan(plan_id: int, user: dict = Depends(current_user)) -> None:
+        """Delete one of your stored study plans."""
+        if not await db.delete_study_plan(user["id"], plan_id):
+            raise HTTPException(404, "no such study plan")
 
     # ------------------------------------------------------------------ search
     async def execute_run(run_id: str, cfg: dict, companies: list[dict],

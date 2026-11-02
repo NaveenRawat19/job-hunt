@@ -287,6 +287,7 @@ def test_study_plan_needs_login(client):
     assert client.post("/study-plan", json=REQ).status_code == 401
     assert client.post("/study-plan/import", json={**REQ, "plan": "x"}).status_code == 401
     assert client.put("/study-plan/1/plan", json={"plan": "x"}).status_code == 401
+    assert client.delete("/study-plan/1").status_code == 401
 
 
 # ------------------------------------------------------------ save / import --
@@ -306,6 +307,33 @@ def test_import_stores_a_ready_made_plan_without_the_llm(client, h, monkeypatch)
     r = client.post("/study-plan/import", headers=h, json={**REQ, "plan": VALID_PLAN})
     assert r.status_code == 201, r.text
     assert r.json()["plan"].count("**Day ") == 56
+    assert client.get("/study-plan", headers=h).json() == r.json()
+
+
+def test_import_accepts_a_structured_json_plan(client, h, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("import must not call the LLM")
+    monkeypatch.setattr(app_module, "resolve", boom)
+    plan = {
+        "weeks": [
+            {
+                "week": week,
+                "title": f"Focus {week}",
+                "days": [
+                    {
+                        "day": day,
+                        "tasks": [{"track": track, "task": f"Study topic {day}"} for track in REQ["tracks"][:3]],
+                    }
+                    for day in range((week - 1) * 7 + 1, week * 7 + 1)
+                ],
+            }
+            for week in range(1, 9)
+        ]
+    }
+    r = client.post("/study-plan/import", headers=h, json={**REQ, "plan": plan})
+    assert r.status_code == 201, r.text
+    assert r.json()["plan"].count("**Day ") == 56
+    assert "**Day 7 (review)**" in r.json()["plan"]
     assert client.get("/study-plan", headers=h).json() == r.json()
 
 
@@ -334,3 +362,26 @@ def test_save_is_scoped_to_the_owner(client, h, fake_llm):
     assert client.put(f"/study-plan/{created['id']}/plan", headers=hb,
                       json={"plan": VALID_PLAN}).status_code == 404
     assert client.put("/study-plan/99999/plan", headers=h, json={"plan": VALID_PLAN}).status_code == 404
+
+
+def test_delete_study_plan_removes_only_the_selected_plan(client, h, fake_llm):
+    first = client.post("/study-plan", headers=h, json=REQ).json()
+    latest = client.post("/study-plan", headers=h, json={**REQ, "goal": "Second"}).json()
+
+    deleted = client.delete(f"/study-plan/{latest['id']}", headers=h)
+
+    assert deleted.status_code == 204
+    assert deleted.content == b""
+    assert client.get("/study-plan", headers=h).json()["id"] == first["id"]
+    assert client.put(f"/study-plan/{latest['id']}/plan", headers=h,
+                      json={"plan": VALID_PLAN}).status_code == 404
+    assert client.delete(f"/study-plan/{latest['id']}", headers=h).status_code == 404
+
+
+def test_users_cannot_delete_each_others_study_plan(client, h, fake_llm):
+    created = client.post("/study-plan", headers=h, json=REQ).json()
+    hb = signup(client, "b@example.com")
+
+    assert client.delete(f"/study-plan/{created['id']}", headers=hb).status_code == 404
+    assert client.get("/study-plan", headers=h).json()["id"] == created["id"]
+    assert client.delete("/study-plan/99999", headers=h).status_code == 404
